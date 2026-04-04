@@ -2,73 +2,99 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
-import streamlit.components.v1 as components
+import smtplib
+from email.message import EmailMessage
+import os
+import math
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Terminal Alpha | Buy & Hold", page_icon="🏢", layout="wide")
+st.set_page_config(page_title="Carteira Maurício | Smart Hold", page_icon="🤖", layout="wide")
 
+# --- CSS AVANÇADO E RESPONSIVO ---
 st.markdown("""
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
     .stProgress > div > div > div > div { background-color: #00fa9a; }
-    .metric-card { background-color: #1e1e1e; padding: 15px; border-radius: 8px; border: 1px solid #333; text-align: center; margin-bottom: 10px; }
+    .bot-message { background: rgba(0, 250, 154, 0.1); border-left: 5px solid #00fa9a; padding: 15px; border-radius: 5px; margin-bottom: 20px; font-size: 1.1em;}
+    .header-mauricio { display: flex; align-items: center; background: linear-gradient(90deg, #0f2027 0%, #203a43 50%, #2c5364 100%); padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
     </style>
 """, unsafe_allow_html=True)
 
+ARQUIVO_ANOTACOES = "anotacoes_mauricio.csv"
+EMAIL_DESTINO_PADRAO = "mauriciomts99@gmail.com"
+
 # ==========================================
-# 1. LISTAS DE ATIVOS (SUA CARTEIRA / RADAR)
+# 1. LISTAS DE ATIVOS
 # ==========================================
 ACOES = [
-    'ITUB4.SA', 'BBAS3.SA', 'SANB11.SA', 'BBDC4.SA', 'BPAC11.SA',
-    'EGIE3.SA', 'TAEE11.SA', 'CPLE6.SA', 'ENBR3.SA', 'ALUP11.SA',
-    'SAPR11.SA', 'SBSP3.SA', 'CSMG3.SA',
-    'WEGE3.SA', 'VALE3.SA', 'PETR4.SA', 'PRIO3.SA', 'B3SA3.SA',
-    'RADL3.SA', 'RENT3.SA', 'LREN3.SA', 'VIVT3.SA', 'SUZB3.SA'
+    'ITUB4.SA', 'BBAS3.SA', 'SANB11.SA', 'BBDC4.SA', 'BBSE3.SA', 'CXSE3.SA', 
+    'EGIE3.SA', 'TAEE11.SA', 'CPLE6.SA', 'SAPR11.SA', 'SBSP3.SA', 'CMIG4.SA', 'TRPL4.SA',
+    'VALE3.SA', 'PETR4.SA', 'SUZB3.SA', 'KLBN11.SA', 'GGBR4.SA',
+    'WEGE3.SA', 'RADL3.SA', 'LREN3.SA', 'VIVT3.SA', 'B3SA3.SA', 'ABEV3.SA'
 ]
 
 FIIS = [
-    'HGLG11.SA', 'BTLG11.SA', 'XPLG11.SA', 'VILG11.SA',
-    'MXRF11.SA', 'KNCR11.SA', 'CPTS11.SA', 'IRDM11.SA',
-    'XPML11.SA', 'VISC11.SA', 'HSML11.SA', 'MALL11.SA',
-    'HGRU11.SA', 'KNRI11.SA', 'TGAR11.SA', 'BCFF11.SA'
+    'HGLG11.SA', 'BTLG11.SA', 'XPLG11.SA', 'VISC11.SA', 'XPML11.SA', 
+    'MXRF11.SA', 'KNCR11.SA', 'CPTS11.SA', 'IRDM11.SA', 'HGRU11.SA', 'VGHF11.SA'
 ]
 
 # ==========================================
-# 2. MOTOR FUNDAMENTALISTA (EXTRAÇÃO DE DADOS)
+# 2. MOTOR QUANTITATIVO (VALUATION GRAHAM E BAZIN)
 # ==========================================
-@st.cache_data(ttl=3600) # Cache de 1 hora (Buy & Hold não exige zero delay)
+@st.cache_data(ttl=3600)
 def buscar_dados_b3(lista_tickers, tipo='acao'):
     dados = []
-    barra = st.progress(0, text=f"Analisando fundamentos de {tipo.upper()}...")
+    barra = st.progress(0, text=f"🤖 Alpha Bot analisando {len(lista_tickers)} {tipo.upper()}s...")
     
     for i, ticker in enumerate(lista_tickers):
         try:
             info = yf.Ticker(ticker).info
-            preco = info.get('currentPrice', info.get('regularMarketPrice', info.get('previousClose', 0)))
+            preco = info.get('currentPrice', info.get('regularMarketPrice', info.get('previousClose', 0.01)))
+            if preco == 0: continue
+
             pvp = info.get('priceToBook', 0)
+            pl = info.get('trailingPE', 0)
             dy_raw = info.get('dividendYield', 0)
             dy = (dy_raw * 100 if dy_raw and dy_raw < 1 else dy_raw) if dy_raw else 0
             
             if tipo == 'acao':
-                pl = info.get('trailingPE', 0)
-                roe = info.get('returnOnEquity', 0)
-                margem = info.get('profitMargins', 0)
+                # VALUATION: FÓRMULA DE GRAHAM (Preço Justo)
+                # Graham = Raiz(22.5 * VPA * LPA)
+                vpa = preco / pvp if pvp and pvp > 0 else 0
+                lpa = preco / pl if pl and pl > 0 else 0
+                
+                graham = 0
+                margem_graham = 0
+                if vpa > 0 and lpa > 0:
+                    graham = math.sqrt(22.5 * vpa * lpa)
+                    margem_graham = ((graham - preco) / preco) * 100
+
+                # VALUATION: FÓRMULA DE BAZIN (Preço Teto para 6% de DY)
+                # Bazin = Dividendo Anual Pago / 0.06
+                dividendo_anual = preco * (dy / 100)
+                bazin = dividendo_anual / 0.06
+                margem_bazin = ((bazin - preco) / preco) * 100 if bazin > 0 else 0
+
                 dados.append({
                     'Ativo': ticker.replace('.SA', ''),
                     'Preço (R$)': round(preco, 2),
-                    'P/L': round(pl, 2) if pl else 0.0,
                     'P/VP': round(pvp, 2) if pvp else 0.0,
-                    'ROE (%)': round((roe or 0) * 100, 2),
-                    'Mrg. Líquida (%)': round((margem or 0) * 100, 2),
+                    'P/L': round(pl, 2) if pl else 0.0,
                     'Div. Yield (%)': round(dy, 2),
+                    'Preço Justo Graham (R$)': round(graham, 2),
+                    'Margem Graham (%)': round(margem_graham, 2),
+                    'Preço Teto Bazin (R$)': round(bazin, 2),
+                    'Margem Bazin (%)': round(margem_bazin, 2),
                 })
             elif tipo == 'fii':
+                # FIIs avaliamos basicamente por P/VP e DY
+                margem_pvp = ((1.0 - pvp) / pvp) * 100 if pvp > 0 else 0
                 dados.append({
                     'Fundo': ticker.replace('.SA', ''),
                     'Preço (R$)': round(preco, 2),
                     'P/VP': round(pvp, 2) if pvp else 0.0,
                     'Div. Yield (%)': round(dy, 2),
+                    'Desconto P/VP (%)': round(margem_pvp, 2)
                 })
         except: pass
         barra.progress((i + 1) / len(lista_tickers))
@@ -76,196 +102,156 @@ def buscar_dados_b3(lista_tickers, tipo='acao'):
     barra.empty()
     return pd.DataFrame(dados)
 
-def conselho_acao(linha):
-    insights = []
-    if 0 < linha['P/L'] <= 10: insights.append("🟢 P/L Muito Descontado")
-    elif 10 < linha['P/L'] <= 15: insights.append("🟡 P/L Justo")
-    elif linha['P/L'] > 20: insights.append("🔴 Caro (Múltiplo Alto)")
-    
-    if linha['ROE (%)'] >= 15: insights.append("🟢 Excelente Gestão (ROE)")
-    if linha['Div. Yield (%)'] >= 6: insights.append("🟢 Vaca Leiteira (DY)")
-    if linha['P/VP'] < 1.0 and linha['P/L'] > 0: insights.append("🔥 Abaixo do Valor Patrimonial")
-    
-    return " | ".join(insights) if insights else "⚪ Neutro"
+def gerar_briefing_diario(df_acoes, df_fiis):
+    # Encontra as top 3 ações por margem de Graham e Bazin
+    boas_graham = df_acoes[(df_acoes['Margem Graham (%)'] > 15)].sort_values(by='Margem Graham (%)', ascending=False).head(2)
+    boas_bazin = df_acoes[(df_acoes['Margem Bazin (%)'] > 10)].sort_values(by='Div. Yield (%)', ascending=False).head(2)
+    bons_fiis = df_fiis[(df_fiis['P/VP'] < 1.0) & (df_fiis['Div. Yield (%)'] > 8)].sort_values(by='Desconto P/VP (%)', ascending=False).head(2)
 
-def conselho_fii(linha):
-    insights = []
-    if 0 < linha['P/VP'] < 0.95: insights.append("🟢 Muito Descontado")
-    elif 0.95 <= linha['P/VP'] <= 1.05: insights.append("🟡 Preço Justo")
-    elif linha['P/VP'] > 1.05: insights.append("🔴 Muito Ágio (Caro)")
+    hoje = datetime.now().strftime("%d/%m/%Y")
     
-    if linha['Div. Yield (%)'] >= 10: insights.append("🟢 Alto Rendimento (Atenção ao risco)")
-    elif 7 <= linha['Div. Yield (%)'] < 10: insights.append("🟢 Rendimento Sólido")
+    texto = f"**🤖 Relatório Matinal Alpha Bot - {hoje}**\n\nFala Maurício! Analisei os {len(ACOES) + len(FIIS)} ativos da sua lista. Aqui estão os destaques de hoje:\n\n"
     
-    return " | ".join(insights) if insights else "⚪ Analise o portfólio"
+    if not boas_graham.empty:
+        texto += "📉 **Ações Descontadas (Fórmula de Graham):**\n"
+        for _, r in boas_graham.iterrows():
+            texto += f"- **{r['Ativo']}**: Preço R$ {r['Preço (R$)']} | Preço Justo: R$ {r['Preço Justo Graham (R$)']} (*Upside de {r['Margem Graham (%)']}%*)\n"
+            
+    if not boas_bazin.empty:
+        texto += "\n💰 **Vacas Leiteiras (Preço Teto Bazin - 6%):**\n"
+        for _, r in boas_bazin.iterrows():
+            texto += f"- **{r['Ativo']}**: Pagando {r['Div. Yield (%)']}% ao ano. Preço teto é R$ {r['Preço Teto Bazin (R$)']}.\n"
+
+    if not bons_fiis.empty:
+        texto += "\n🏢 **FIIs a Preço de Banana:**\n"
+        for _, r in bons_fiis.iterrows():
+            texto += f"- **{r['Fundo']}**: Sendo negociado a um P/VP de {r['P/VP']} (Desconto de {r['Desconto P/VP (%)']}% no patrimônio).\n"
+
+    return texto
 
 # ==========================================
-# 3. TRADINGVIEW WIDGET
+# 3. INTERFACE E MENU
 # ==========================================
-def grafico_tradingview(simbolo, tempo="D", altura=500):
-    tv_symbol = f"BMFBOVESPA:{simbolo.replace('.SA', '')}"
-    html = f"""
-    <div class="tradingview-widget-container">
-      <div id="tv_{tempo}_{tv_symbol}"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget(
-      {{
-      "width": "100%", "height": {altura}, "symbol": "{tv_symbol}", "interval": "{tempo}",
-      "timezone": "America/Sao_Paulo", "theme": "dark", "style": "1", "locale": "br",
-      "enable_publishing": false, "allow_symbol_change": true, "container_id": "tv_{tempo}_{tv_symbol}"
-      }});
-      </script>
+st.markdown("""
+<div class="header-mauricio">
+    <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#00fa9a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 15px;">
+        <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+    </svg>
+    <div>
+        <h1 style="margin:0; color:white; font-size:2em;">Carteira Maurício | Smart Hold</h1>
+        <p style="margin:0; color:#00fa9a;">Motor Quantitativo & Valuation em Tempo Real</p>
     </div>
-    """
-    components.html(html, height=altura)
+</div>
+""", unsafe_allow_html=True)
 
-# ==========================================
-# 4. MENU LATERAL
-# ==========================================
-st.sidebar.title("🧭 Alpha Buy & Hold")
+st.sidebar.title("🧭 Módulos")
 menu = st.sidebar.radio("Navegação:", [
-    "📊 Radar de Dividendos", 
-    "🎯 Filtro Mágico (Screener)",
-    "🔍 Dossiê do Ativo"
+    "🤖 Resumo Diário (IA)",
+    "🎯 Calcular Aporte de Hoje",
+    "📊 Radar de Valuation", 
+    "📝 Diário de Bordo"
 ])
 
-st.sidebar.markdown("---")
-if st.sidebar.button("Atualizar Dados da B3 🔄", use_container_width=True):
+# Carrega os dados na memória (Cache)
+df_acoes = buscar_dados_b3(ACOES, 'acao')
+df_fiis = buscar_dados_b3(FIIS, 'fii')
+
+if st.sidebar.button("Forçar Atualização 🔄", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-# ==========================================
-# MÓDULO 1: RADAR DE DIVIDENDOS (VISÃO GERAL)
-# ==========================================
-if menu == "📊 Radar de Dividendos":
-    st.title("📊 Painel Geral da Carteira B3")
-    st.write("Acompanhe os múltiplos e indicadores das empresas da sua Watchlist.")
+# ------------------------------------------
+# MÓDULO 1: BRIEFING DIÁRIO (NOVO)
+# ------------------------------------------
+if menu == "🤖 Resumo Diário (IA)":
+    st.title("Sua Reunião Matinal")
+    if not df_acoes.empty and not df_fiis.empty:
+        briefing = gerar_briefing_diario(df_acoes, df_fiis)
+        st.markdown(f"<div class='bot-message'>{briefing}</div>", unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Ações Analisadas", len(df_acoes))
+        col2.metric("Ações com Margem > 10%", len(df_acoes[df_acoes['Margem Graham (%)'] > 10]))
+        col3.metric("FIIs com P/VP < 1.0", len(df_fiis[df_fiis['P/VP'] < 1.0]))
+
+# ------------------------------------------
+# MÓDULO 2: ASSISTENTE DE APORTE (INTELIGENTE)
+# ------------------------------------------
+elif menu == "🎯 Calcular Aporte de Hoje":
+    st.title("🎯 Máquina de Aporte Eficiente")
+    st.write("Digite o valor. O robô vai calcular a quantidade exata de lotes fracionários das ações com maior **Margem de Segurança** para otimizar seu dinheiro.")
     
-    aba1, aba2 = st.tabs(["🏢 Ações (Empresas)", "🏘️ FIIs (Imóveis e Papel)"])
+    valor_aporte = st.number_input("💸 Dinheiro na Corretora hoje (R$):", min_value=10.0, value=300.0, step=50.0)
+    estrategia = st.radio("Qual seu foco hoje?", ["Crescimento & Valor (Graham)", "Renda Passiva (Bazin / FIIs)"], horizontal=True)
+
+    if estrategia == "Crescimento & Valor (Graham)":
+        filtradas = df_acoes[(df_acoes['Preço (R$)'] <= valor_aporte) & (df_acoes['Margem Graham (%)'] > 5)].copy()
+        filtradas = filtradas.sort_values(by='Margem Graham (%)', ascending=False)
+        motivo = "Margem Graham (%)"
+    else:
+        filtradas = df_acoes[(df_acoes['Preço (R$)'] <= valor_aporte) & (df_acoes['Margem Bazin (%)'] > 0)].copy()
+        filtradas = filtradas.sort_values(by='Div. Yield (%)', ascending=False)
+        motivo = "Div. Yield (%)"
+
+    if not filtradas.empty:
+        st.success(f"Opções calculadas! Focando em: {estrategia}")
+        
+        # Otimizador de Carteira Simples
+        top_3 = filtradas.head(3).copy()
+        top_3['Qtd. Máx'] = (valor_aporte // top_3['Preço (R$)']).astype(int)
+        top_3['Custo (R$)'] = top_3['Qtd. Máx'] * top_3['Preço (R$)']
+        
+        st.dataframe(
+            top_3[['Ativo', 'Preço (R$)', motivo, 'Qtd. Máx', 'Custo (R$)']].style.highlight_max(subset=[motivo], color='darkgreen'),
+            use_container_width=True, hide_index=True
+        )
+    else:
+        st.warning("Com esse valor e filtros rígidos da IA, não há compras claras. Acumule caixa!")
+
+# ------------------------------------------
+# MÓDULO 3: RADAR DE VALUATION COMPLETO
+# ------------------------------------------
+elif menu == "📊 Radar de Valuation":
+    st.title("📊 Painel de Controle Analítico")
+    st.write("A tabela inteira com os cálculos matemáticos já processados.")
+    
+    aba1, aba2 = st.tabs(["📈 Ações (Valuation)", "🏢 FIIs (Yield & Desconto)"])
     
     with aba1:
-        df_acoes = buscar_dados_b3(ACOES, 'acao')
-        if not df_acoes.empty:
-            df_acoes['Avaliação da IA'] = df_acoes.apply(conselho_acao, axis=1)
-            st.dataframe(
-                df_acoes, use_container_width=True, hide_index=True,
-                column_config={
-                    "ROE (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=30),
-                    "Mrg. Líquida (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=30),
-                    "Div. Yield (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=15)
-                }
-            )
-            
+        st.dataframe(
+            df_acoes.style.background_gradient(cmap='Greens', subset=['Margem Graham (%)', 'Margem Bazin (%)', 'Div. Yield (%)']),
+            use_container_width=True, hide_index=True
+        )
     with aba2:
-        df_fiis = buscar_dados_b3(FIIS, 'fii')
-        if not df_fiis.empty:
-            df_fiis['Avaliação da IA'] = df_fiis.apply(conselho_fii, axis=1)
-            st.dataframe(
-                df_fiis, use_container_width=True, hide_index=True,
-                column_config={
-                    "Div. Yield (%)": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=15),
-                    "P/VP": st.column_config.NumberColumn(format="%.2f")
-                }
-            )
+        st.dataframe(
+            df_fiis.style.background_gradient(cmap='Greens', subset=['Desconto P/VP (%)', 'Div. Yield (%)']),
+            use_container_width=True, hide_index=True
+        )
 
-# ==========================================
-# MÓDULO 2: FILTRO MÁGICO (AUTOMAÇÃO DE ESCOLHA)
-# ==========================================
-elif menu == "🎯 Filtro Mágico (Screener)":
-    st.title("🎯 Automação de Stock Picking")
-    st.info("Defina seus critérios de Value Investing. O robô varrerá sua lista e mostrará apenas as ações que cumprem as regras.")
+# ------------------------------------------
+# MÓDULO 4: DIÁRIO DE BORDO
+# ------------------------------------------
+elif menu == "📝 Diário de Bordo":
+    st.title("📝 Teses de Investimento")
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1: max_pl = st.slider("P/L Máximo (Barateza)", 5, 30, 15)
-    with col2: max_pvp = st.slider("P/VP Máximo (Desconto)", 0.5, 5.0, 2.0, 0.1)
-    with col3: min_roe = st.slider("ROE Mínimo % (Eficiência)", 0, 30, 10)
-    with col4: min_dy = st.slider("Yield Mínimo % (Renda)", 0, 15, 6)
-    
-    st.markdown("---")
-    
-    df_acoes = buscar_dados_b3(ACOES, 'acao')
-    if not df_acoes.empty:
-        # Filtro Matemático
-        filtradas = df_acoes[
-            (df_acoes['P/L'] > 0) & # Ignora empresas dando prejuízo
-            (df_acoes['P/L'] <= max_pl) & 
-            (df_acoes['P/VP'] <= max_pvp) & 
-            (df_acoes['ROE (%)'] >= min_roe) & 
-            (df_acoes['Div. Yield (%)'] >= min_dy)
-        ].sort_values(by='Div. Yield (%)', ascending=False)
+    with st.form("nova_anotacao"):
+        ativo_nota = st.text_input("Ativo (ex: BBAS3):").upper()
+        texto_nota = st.text_area("Tese ou Anotação:")
+        salvar = st.form_submit_button("Registrar no Diário 💾")
         
-        if not filtradas.empty:
-            st.success(f"Encontramos {len(filtradas)} ações que batem exatamente com a sua estratégia!")
-            st.dataframe(filtradas, use_container_width=True, hide_index=True)
-        else:
-            st.warning("Nenhuma ação da sua lista atende a critérios tão rígidos neste momento. Tente afrouxar os filtros.")
-
-# ==========================================
-# MÓDULO 3: DOSSIÊ DO ATIVO
-# ==========================================
-elif menu == "🔍 Dossiê do Ativo":
-    st.title("🔍 Raio-X Fundamentalista")
-    
-    ticker_input = st.text_input("Digite o código B3 (ex: PETR4, ITUB4, HGLG11):", "WEGE3").upper().replace('.SA', '')
-    ticker_completo = f"{ticker_input}.SA"
-    
-    if ticker_input:
-        with st.spinner(f"Abrindo livros de {ticker_input}..."):
-            ativo = yf.Ticker(ticker_completo)
-            info = ativo.info
+        if salvar and ativo_nota and texto_nota:
+            nova_linha = pd.DataFrame([{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Ativo": ativo_nota, "Anotação": texto_nota}])
+            if os.path.exists(ARQUIVO_ANOTACOES):
+                df_notas = pd.read_csv(ARQUIVO_ANOTACOES)
+                df_notas = pd.concat([nova_linha, df_notas], ignore_index=True)
+            else:
+                df_notas = nova_linha
+            df_notas.to_csv(ARQUIVO_ANOTACOES, index=False)
+            st.success("Tese salva com sucesso!")
             
-            if 'regularMarketPrice' in info or 'currentPrice' in info or 'previousClose' in info:
-                nome_empresa = info.get('longName', ticker_input)
-                preco_atual = info.get('currentPrice', info.get('regularMarketPrice', info.get('previousClose', 0)))
-                
-                # Links Externos Úteis
-                is_fii = len(ticker_input) == 6 and (ticker_input.endswith('11') or ticker_input.endswith('12'))
-                url_status = f"https://statusinvest.com.br/fundos-imobiliarios/{ticker_input.lower()}" if is_fii else f"https://statusinvest.com.br/acoes/{ticker_input.lower()}"
-                url_investidor = f"https://investidor10.com.br/{'fundos-imobiliarios' if is_fii else 'acoes'}/{ticker_input.lower()}"
-                
-                st.markdown(f"### 🏢 {nome_empresa} | [🔗 StatusInvest]({url_status}) | [🔗 Investidor10]({url_investidor})")
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Preço Atual", f"R$ {preco_atual:.2f}")
-                c2.metric("P/VP", f"{info.get('priceToBook', 'N/A')}")
-                c3.metric("Div. Yield", f"{round(info.get('dividendYield', 0) * 100, 2) if info.get('dividendYield') else 0}%")
-                
-                # FIIs não têm P/L tradicional
-                if not is_fii:
-                    c4.metric("P/L", f"{round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else 'N/A'}")
-                else:
-                    c4.metric("Mínima 52 sem.", f"R$ {info.get('fiftyTwoWeekLow', 0):.2f}")
-                
-                st.markdown("---")
-                st.markdown("### 📊 Comportamento de Longo Prazo (Gráfico Mensal/Semanal)")
-                # Gráfico Semanal (W) é muito melhor para Buy & Hold do que diário (D)
-                grafico_tradingview(ticker_completo, "W", 450)
-                
-                st.markdown("---")
-                col_esq, col_dir = st.columns([1, 1])
-                
-                with col_esq:
-                    st.markdown("### ⚙️ Fundamentos da Empresa")
-                    st.write(f"- **Setor:** {info.get('sector', 'Fundo Imobiliário' if is_fii else 'N/A')}")
-                    if not is_fii:
-                        st.write(f"- **Margem Líquida:** {round(info.get('profitMargins', 0) * 100, 2) if info.get('profitMargins') else 'N/A'}%")
-                        st.write(f"- **ROE:** {round(info.get('returnOnEquity', 0) * 100, 2) if info.get('returnOnEquity') else 'N/A'}%")
-                        st.write(f"- **Dívida / Patrimônio:** {info.get('debtToEquity', 'N/A')}")
-                    st.write(f"- **Valor de Mercado:** R$ {info.get('marketCap', 'N/A'):,}".replace(',', '.'))
-                    
-                    resumo = info.get('longBusinessSummary', "Resumo não disponível para este ativo.")
-                    st.info(resumo[:800] + "..." if len(resumo) > 800 else resumo)
-
-                with col_dir:
-                    st.markdown("### 📰 Últimas Notícias Corporativas")
-                    noticias = ativo.news
-                    if noticias:
-                        for n in noticias[:4]:
-                            titulo, link = n.get('title', 'Sem título'), n.get('link', '#')
-                            timestamp = n.get('providerPublishTime')
-                            data_pub = datetime.fromtimestamp(timestamp).strftime('%d/%m/%Y') if timestamp else ""
-                            st.write(f"📅 {data_pub} — [{titulo}]({link})")
-                            st.divider()
-                    else: st.write("Nenhuma notícia recente no radar.")
-            else: st.error("Ativo não encontrado. Verifique se digitou corretamente (sem o .SA).")
+    st.markdown("### 📚 Histórico")
+    if os.path.exists(ARQUIVO_ANOTACOES):
+        df_historico = pd.read_csv(ARQUIVO_ANOTACOES)
+        for _, row in df_historico.iterrows():
+            with st.expander(f"📌 {row['Ativo']} - {row['Data']}"):
+                st.write(row['Anotação'])
