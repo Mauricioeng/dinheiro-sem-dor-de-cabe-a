@@ -8,6 +8,14 @@ import requests
 import urllib.request
 import xml.etree.ElementTree as ET
 
+# --- TENTATIVA DE IMPORTAR MACHINE LEARNING ---
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Carteira Maurício | Smart Hold", page_icon="🤖", layout="wide")
 
@@ -40,26 +48,24 @@ FIIS = [
 ]
 
 # ==========================================
-# 2. MOTOR DE DADOS E MACROECONOMIA
+# 2. MOTOR DE DADOS, MACROECONOMIA E IA
 # ==========================================
 @st.cache_data(ttl=86400) # Atualiza a cada 24h
 def buscar_dados_macro():
-    """Busca Selic e IPCA direto da API oficial do Banco Central do Brasil"""
+    """Busca Selic e IPCA direto da API oficial do BCB"""
     try:
-        # Selic Meta (código 432 do BCB)
         res_selic = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1?formato=json", timeout=5).json()
         selic = float(res_selic[0]['valor'])
         
-        # IPCA 12 Meses (código 13522 do BCB)
         res_ipca = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.13522/dados/ultimos/1?formato=json", timeout=5).json()
         ipca = float(res_ipca[0]['valor'])
         return selic, ipca
     except:
-        return 10.50, 4.50 # Valores de fallback caso o BCB esteja fora do ar
+        return 10.50, 4.50
 
 @st.cache_data(ttl=3600) # Atualiza a cada hora
 def buscar_noticias():
-    """Busca notícias via RSS do Google News focado no Mercado Brasileiro"""
+    """Busca notícias via RSS do Google News focado na B3"""
     noticias = []
     try:
         url = "https://news.google.com/rss/search?q=ibovespa+selic+ações+economia+brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419"
@@ -67,19 +73,60 @@ def buscar_noticias():
         xml_data = urllib.request.urlopen(req, timeout=5).read()
         root = ET.fromstring(xml_data)
         
-        for item in root.findall('./channel/item')[:5]: # Pega as 5 mais quentes
+        for item in root.findall('./channel/item')[:5]:
             noticias.append({
                 'titulo': item.find('title').text,
                 'link': item.find('link').text,
-                'data': item.find('pubDate').text[5:16] # Limpa a data
+                'data': item.find('pubDate').text[5:16]
             })
     except: pass
     return noticias
 
+def aplicar_machine_learning(df):
+    """Usa ML K-Means para clusterizar (agrupar) as ações com base em fundamentos"""
+    if not ML_AVAILABLE or df.empty:
+        df['Perfil IA'] = "🤖 IA Desativada/Sem Dados"
+        return df
+
+    # Filtra apenas ações com dados válidos para não quebrar a IA
+    df_ml = df[(df['P/VP'] > 0) & (df['Preço Justo (R$)'] > 0)].copy()
+    
+    if len(df_ml) < 5:
+        df['Perfil IA'] = "❓ Dados Insuficientes"
+        return df
+        
+    features = ['P/VP', 'Div. Yield (%)', 'Margem Graham (%)']
+    X = df_ml[features]
+    
+    # Padroniza a escala matemática
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Roda o Algoritmo K-Means
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    df_ml['Cluster_ID'] = kmeans.fit_predict(X_scaled)
+    
+    # Identifica quem é quem
+    medias = df_ml.groupby('Cluster_ID')[features].mean()
+    id_dividendos = medias['Div. Yield (%)'].idxmax()
+    id_desconto = medias['Margem Graham (%)'].idxmax()
+    
+    def nomear_cluster(row):
+        if row['Cluster_ID'] == id_dividendos: return "🐄 Vaca Leiteira (Foco DY)"
+        elif row['Cluster_ID'] == id_desconto: return "💎 Oportunidade (Desconto)"
+        else: return "⚖️ Equilíbrio / Crescimento"
+        
+    df_ml['Perfil IA'] = df_ml.apply(nomear_cluster, axis=1)
+    
+    # Mescla de volta no Dataframe Original
+    df = df.merge(df_ml[['Ativo', 'Perfil IA']], on='Ativo', how='left')
+    df['Perfil IA'] = df['Perfil IA'].fillna("❓ Sem Classificação")
+    return df
+
 @st.cache_data(ttl=3600)
 def buscar_dados_b3(lista_tickers, tipo='acao'):
     dados = []
-    barra = st.progress(0, text=f"🤖 Alpha Bot analisando {len(lista_tickers)} {tipo.upper()}s...")
+    barra = st.progress(0, text=f"🤖 Alpha Bot extraindo dados de {len(lista_tickers)} {tipo.upper()}s...")
     
     for i, ticker in enumerate(lista_tickers):
         try:
@@ -125,7 +172,12 @@ def buscar_dados_b3(lista_tickers, tipo='acao'):
         barra.progress((i + 1) / len(lista_tickers))
     
     barra.empty()
-    return pd.DataFrame(dados)
+    df_final = pd.DataFrame(dados)
+    
+    if tipo == 'acao' and not df_final.empty:
+        df_final = aplicar_machine_learning(df_final)
+        
+    return df_final
 
 # ==========================================
 # 3. INTERFACE E MENU
@@ -137,10 +189,13 @@ st.markdown("""
     </svg>
     <div>
         <h1 style="margin:0; color:white; font-size:2em;">Carteira Maurício | Smart Hold</h1>
-        <p style="margin:0; color:#00fa9a;">Inteligência Analítica & Macroeconomia</p>
+        <p style="margin:0; color:#00fa9a;">Inteligência Quantitativa & Macroeconomia</p>
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+if not ML_AVAILABLE:
+    st.sidebar.warning("⚠️ IA Desativada. Adicione 'scikit-learn' no requirements.txt.")
 
 st.sidebar.title("🧭 Módulos")
 menu = st.sidebar.radio("Navegação:", [
@@ -150,13 +205,13 @@ menu = st.sidebar.radio("Navegação:", [
     "📝 Diário de Bordo"
 ])
 
-# Carregamento de Dados
+# Carregamento de Dados (Fica na memória rápida via Cache)
 df_acoes = buscar_dados_b3(ACOES, 'acao')
 df_fiis = buscar_dados_b3(FIIS, 'fii')
 selic_atual, ipca_atual = buscar_dados_macro()
 noticias_mercado = buscar_noticias()
 
-if st.sidebar.button("Forçar Atualização 🔄", use_container_width=True):
+if st.sidebar.button("Forçar Atualização de Preços 🔄", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
@@ -166,28 +221,28 @@ if st.sidebar.button("Forçar Atualização 🔄", use_container_width=True):
 if menu == "🤖 Visão Geral & Macro":
     st.title("Sua Reunião Matinal")
     
-    # KPIs Macro (Taxa de Juros vs Inflação Real)
+    # KPIs Macro
     c1, c2, c3 = st.columns(3)
     c1.metric("Taxa Selic (BCB)", f"{selic_atual}% ao ano")
     c2.metric("Inflação IPCA (12m)", f"{ipca_atual}% ao ano")
     juros_reais = round(selic_atual - ipca_atual, 2)
     c3.metric("Juros Reais (Lucro Fixo)", f"+{juros_reais}% ao ano", delta_color="normal")
     
-    # Texto do Robô
-    texto_bot = f"**Fala Maurício!** Com a Selic a {selic_atual}% e inflação a {ipca_atual}%, o Brasil paga juros reais altos. "
-    texto_bot += "Na renda variável, exija empresas que paguem Dividendos maiores que a inflação ou ações com alto potencial de crescimento.\n\n"
+    # Texto do Robô adaptativo
+    texto_bot = f"**Fala Maurício!** Com a Selic a {selic_atual}% e inflação a {ipca_atual}%, o Brasil entrega juros reais formidáveis. "
+    texto_bot += "Na renda variável, a inteligência recomenda buscar ativos que entreguem prêmios de risco reais.\n\n"
     
     boas_graham = df_acoes[(df_acoes['Margem Graham (%)'] > 15)].sort_values(by='Margem Graham (%)', ascending=False).head(2)
     bons_fiis = df_fiis[(df_fiis['P/VP'] < 1.0) & (df_fiis['Div. Yield (%)'] > selic_atual*0.7)].sort_values(by='Desconto P/VP (%)', ascending=False).head(2)
 
     if not boas_graham.empty:
-        texto_bot += "📉 **Oportunidades de Valor:** Encontrei margem segura em " + ", ".join([r['Ativo'] for _, r in boas_graham.iterrows()]) + ".\n"
+        texto_bot += "📉 **Oportunidades de Valor:** A IA detectou margem segura em " + ", ".join([r['Ativo'] for _, r in boas_graham.iterrows()]) + ".\n"
     if not bons_fiis.empty:
         texto_bot += "🏢 **FIIs Descontados:** Fique de olho em " + ", ".join([r['Fundo'] for _, r in bons_fiis.iterrows()]) + "."
         
     st.markdown(f"<div class='bot-message'>{texto_bot}</div>", unsafe_allow_html=True)
     
-    # Seção de Notícias
+    # Notícias
     st.markdown("### 📰 Giro do Mercado (Últimas Notícias)")
     if noticias_mercado:
         for n in noticias_mercado:
@@ -196,44 +251,50 @@ if menu == "🤖 Visão Geral & Macro":
         st.write("Sem notícias no momento.")
 
 # ------------------------------------------
-# MÓDULO 2: CALCULAR APORTE
+# MÓDULO 2: CALCULAR APORTE (APRIMORADO COM IA)
 # ------------------------------------------
 elif menu == "🎯 Calcular Aporte de Hoje":
-    st.title("🎯 Máquina de Aporte Eficiente")
+    st.title("🎯 Máquina de Aporte Inteligente")
     
-    valor_aporte = st.number_input("💸 Dinheiro na Corretora hoje (R$):", min_value=10.0, value=300.0, step=50.0)
-    estrategia = st.radio("Qual seu foco hoje?", ["Valor (Graham)", "Renda Passiva (Bazin)"], horizontal=True)
+    valor_aporte = st.number_input("💸 Dinheiro disponível hoje (R$):", min_value=10.0, value=300.0, step=50.0)
+    estrategia = st.radio("Qual seu foco estratégico?", ["Valor (Margem de Segurança)", "Renda Passiva (Dividendos)"], horizontal=True)
 
-    if estrategia == "Valor (Graham)":
+    if estrategia == "Valor (Margem de Segurança)":
         filtradas = df_acoes[(df_acoes['Preço (R$)'] <= valor_aporte) & (df_acoes['Margem Graham (%)'] > 0)].copy()
-        filtradas = filtradas.sort_values(by='Margem Graham (%)', ascending=False).head(3)
+        filtradas = filtradas.sort_values(by='Margem Graham (%)', ascending=False).head(4)
     else:
         filtradas = df_acoes[(df_acoes['Preço (R$)'] <= valor_aporte) & (df_acoes['Margem Bazin (%)'] > 0)].copy()
-        filtradas = filtradas.sort_values(by='Div. Yield (%)', ascending=False).head(3)
+        filtradas = filtradas.sort_values(by='Div. Yield (%)', ascending=False).head(4)
 
     if not filtradas.empty:
         filtradas['Qtd. Máx'] = (valor_aporte // filtradas['Preço (R$)']).astype(int)
-        filtradas['Custo Total (R$)'] = filtradas['Qtd. Máx'] * filtradas['Preço (R$)']
+        filtradas['Custo (R$)'] = filtradas['Qtd. Máx'] * filtradas['Preço (R$)']
         
-        st.success(f"Opções calculadas! Focando em: {estrategia}")
-        st.dataframe(filtradas[['Ativo', 'Preço (R$)', 'Qtd. Máx', 'Custo Total (R$)', 'Margem Graham (%)', 'Div. Yield (%)']], use_container_width=True, hide_index=True)
+        st.success(f"Portfólio otimizado para o valor de R$ {valor_aporte:.2f}")
+        
+        # Mostra a tabela de forma mais elegante e com o Perfil IA
+        st.dataframe(
+            filtradas[['Ativo', 'Perfil IA', 'Preço (R$)', 'Qtd. Máx', 'Custo (R$)', 'Margem Graham (%)', 'Div. Yield (%)']], 
+            use_container_width=True, 
+            hide_index=True
+        )
     else:
-        st.warning("Com esse valor e filtros rígidos da IA, não há compras claras.")
+        st.warning("Com esse valor e filtros rígidos de proteção, não há compras claras no momento.")
 
 # ------------------------------------------
-# MÓDULO 3: RADAR DE VALUATION (CORRIGIDO)
+# MÓDULO 3: RADAR DE VALUATION
 # ------------------------------------------
 elif menu == "📊 Radar de Valuation":
-    st.title("📊 Painel de Controle Analítico")
-    st.write("Cálculos completos. O sistema usa barras visuais para facilitar a visualização de boas margens.")
+    st.title("📊 Painel Analítico Quantitativo")
+    st.write("Visualização completa do mercado. A Inteligência Artificial (K-Means) agrupa os ativos para facilitar a leitura.")
     
-    aba1, aba2 = st.tabs(["📈 Ações (Valuation)", "🏢 FIIs (Yield & Desconto)"])
+    aba1, aba2 = st.tabs(["📈 Ações (Valuation & IA)", "🏢 FIIs (Yield & Desconto)"])
     
     with aba1:
-        # Usando o Column Config Nativo do Streamlit (Sem erro de Matplotlib!)
         st.dataframe(
-            df_acoes,
+            df_acoes[['Ativo', 'Perfil IA', 'Preço (R$)', 'P/VP', 'Div. Yield (%)', 'Margem Graham (%)']],
             column_config={
+                "Perfil IA": st.column_config.TextColumn("Veredito da IA"),
                 "Margem Graham (%)": st.column_config.ProgressColumn("Margem Graham (%)", format="%f%%", min_value=0, max_value=50),
                 "Div. Yield (%)": st.column_config.ProgressColumn("Div. Yield (%)", format="%f%%", min_value=0, max_value=15),
             },
@@ -256,8 +317,9 @@ elif menu == "📝 Diário de Bordo":
     st.title("📝 Teses de Investimento")
     with st.form("nova_anotacao"):
         ativo_nota = st.text_input("Ativo (ex: BBAS3):").upper()
-        texto_nota = st.text_area("Tese ou Anotação:")
-        salvar = st.form_submit_button("Registrar no Diário 💾")
+        texto_nota = st.text_area("Sua tese, motivo de compra ou anotação macro:")
+        salvar = st.form_submit_button("Registrar no Banco de Dados 💾")
+        
         if salvar and ativo_nota and texto_nota:
             nova_linha = pd.DataFrame([{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Ativo": ativo_nota, "Anotação": texto_nota}])
             if os.path.exists(ARQUIVO_ANOTACOES):
